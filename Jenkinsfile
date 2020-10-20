@@ -1,10 +1,12 @@
 node {
     checkout scm
-    docker.image('jenkins-node:beta').inside("""--entrypoint=''""") {
+    docker.image('cloudgaia/sfdx-cli:1.2').inside("""--entrypoint=''""") {
         //build de app and execute unit test
         stage('Build & Unit test'){
             //this option -DskipITs=true skip integration tests
             sh 'echo "this is a test"'
+            sh 'sfdx --help'
+            sh 'sfdx sfpowerkit --help'
             // sh 'mvn clean verify -DskipITs=true';
             // junit '**/target/surefire-reports/TEST-*.xml'
             // archiveArtifacts artifacts: '**/target/surefire-reports/TEST-*.xml'
