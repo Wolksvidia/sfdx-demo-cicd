@@ -1,0 +1,74 @@
+{
+  "id": "c4fdc091-44fd-437f-8225-05e3de501e33",
+  "version": "2.0",
+  "name": "SeleniumTestZurichGestiones2",
+  "url": "https://uat-zurich.cs22.force.com",
+  "tests": [{
+    "id": "033e1fa7-39c6-494b-9566-e03eab50e191",
+    "name": "TestCaseGestiones1",
+    "commands": [{
+      "id": "dd82e44f-9ef5-4830-acbd-bf2b9aabb15a",
+      "comment": "",
+      "command": "open",
+      "target": "/s/resumen?param=jw7ly5sAobhORAeXMMOUthflOl4sIjZ0mDna5fTHgZ9bcLJ0XHbIICO-XVRdhkRlztj9pvYvQ9mCeTfWGa5Qei-mssEkaJIhIrTvTzJ94nEtr_NxsqDFDS_bSKGqXKkg3cc2e-WxJcLDaTwaShVagds_1CUau_wRQwXAifmIVFyTm2tp5gV9usdKoOb4QUWZ&iv=MTIzNDU2Nzg5MDEyMzQ1Ng%3D%3D",
+      "targets": [],
+      "value": ""
+    }, {
+      "id": "79124997-d173-439b-a95f-6c3972944df6",
+      "comment": "",
+      "command": "setWindowSize",
+      "target": "889x745",
+      "targets": [],
+      "value": ""
+    }, {
+      "id": "d742282b-e396-4662-a276-2dc819d692a5",
+      "comment": "",
+      "command": "click",
+      "target": "id=panel-Gestiones-tab",
+      "targets": [
+        ["id=panel-Gestiones-tab", "id"],
+        ["linkText=Gestiones", "linkText"],
+        ["css=#panel-Gestiones-tab", "css:finder"],
+        ["xpath=//a[contains(text(),'Gestiones')]", "xpath:link"],
+        ["xpath=//a[@id='panel-Gestiones-tab']", "xpath:attributes"],
+        ["xpath=//li[@id='item5']/a", "xpath:idRelative"],
+        ["xpath=(//a[contains(@href, 'javascript:void(0);')])[6]", "xpath:href"],
+        ["xpath=//li[5]/a", "xpath:position"],
+        ["xpath=//a[contains(.,'Gestiones')]", "xpath:innerText"]
+      ],
+      "value": ""
+    }, {
+      "id": "2109f660-75e6-454f-b833-ca45f624155b",
+      "comment": "",
+      "command": "click",
+      "target": "css=.cAccordeon:nth-child(1) span",
+      "targets": [
+        ["css=.cAccordeon:nth-child(1) span", "css:finder"],
+        ["xpath=//div[2]/div/div/span", "xpath:position"],
+        ["xpath=//span[contains(.,'Como cambiar el domicilio')]", "xpath:innerText"]
+      ],
+      "value": ""
+    }, {
+      "id": "9b462a42-2d8e-4637-8ad5-f2b55c53ecf1",
+      "comment": "",
+      "command": "assertText",
+      "target": "//div[contains(@id,'collapseItem-')]//p[1]//p",
+      "targets": [
+        ["css=#collapseItem-487tdfsosys > p > p:nth-child(1)", "css:finder"],
+        ["xpath=//div[@id='collapseItem-487tdfsosys']/p/p", "xpath:idRelative"],
+        ["xpath=//p/p", "xpath:position"]
+      ],
+      "value": "Podes cambiar el domicilio particular, el de correspondencia o ambos."
+    }]
+  }],
+  "suites": [{
+    "id": "3b4fe926-d224-4728-a0c4-5639db53ceff",
+    "name": "Default Suite",
+    "persistSession": false,
+    "parallel": false,
+    "timeout": 300,
+    "tests": ["033e1fa7-39c6-494b-9566-e03eab50e191"]
+  }],
+  "urls": ["https://uat-zurich.cs22.force.com/"],
+  "plugins": []
+}

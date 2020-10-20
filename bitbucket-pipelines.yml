@@ -1,0 +1,398 @@
+# Pipelines para deploy y test del proyecto CMS.
+definitions:
+  steps:
+    - step: &sca
+        image: cloudgaia/pmd:6.25
+        name: Static Code Analyzer
+        script:
+          - |
+              echo "Run Static Code Analyzer"
+              mkdir test-reports
+              pmd -d $DEPLOYDIR -R rulesets/apex/quickstart.xml -f csv -failOnViolation false -reportfile report.csv -no-cache
+              python3 /opt/assets/sca_quality_gate.py
+        after-script:
+          - | 
+              mv sca_results.csv test-reports/sca_results_$BITBUCKET_BUILD_NUMBER.csv
+              echo "Upload Reports to Confluence"
+              curl -v -S -u $CONFLUENCE_USER:$CONFLUENCE_KEY -X POST -H "X-Atlassian-Token: no-check" -F "file=@test-reports/sca_results_$BITBUCKET_BUILD_NUMBER.csv" -F "comment=PMD results of CI deployment number $BITBUCKET_BUILD_NUMBER" "https://cloudgaia.atlassian.net/wiki/rest/api/content/401047657/child/attachment" || true
+  
+    - step: &runLWCTests
+        image: cloudgaia/sfdx-cli:1.2
+        name: Run LWC Tests
+        script:
+          - |
+              echo "Run LWC Unit tests"
+              npm install
+              mkdir test-reports
+              npm run test:unit:report
+        after-script:
+          - |
+              mv junit.xml test-reports/test-result-lwc_$BITBUCKET_BUILD_NUMBER.xml
+              echo "Upload Junit Report to Xray"
+              export token=$(curl -H "Content-Type: application/json" -X POST --data "{ \"client_id\": \"$client_id\",\"client_secret\": \"$client_secret\" }" https://xray.cloud.xpand-it.com/api/v1/authenticate| tr -d '"')
+              curl -H "Content-Type: text/xml" -H "Authorization: Bearer $token" --data @test-reports/test-result-lwc_$BITBUCKET_BUILD_NUMBER.xml "https://xray.cloud.xpand-it.com/api/v1/import/execution/junit?projectKey=$JIRAKEY" || true
+          - | 
+              echo "Upload Reports to Confluence"
+              curl -v -S -u $CONFLUENCE_USER:$CONFLUENCE_KEY -X POST -H "X-Atlassian-Token: no-check" -F "file=@test-reports/test-result-lwc_$BITBUCKET_BUILD_NUMBER.xml" -F "comment=Test results LWC of deployment number $BITBUCKET_BUILD_NUMBER" "https://cloudgaia.atlassian.net/wiki/rest/api/content/396068015/child/attachment" || true
+  
+    - step: &runApexTests
+        image: cloudgaia/sfdx-cli:1.2
+        name: Run Apex Tests
+        script:
+          - |
+              echo "Authorize CLI"
+              if [ $AUTHURL ]; then 
+                echo $AUTHURL >> authurl.txt
+              fi
+              sfdx force:auth:sfdxurl:store -f ./authurl.txt -s -a org
+          - |
+              echo "Run Unit tests"
+              mkdir test-reports
+              sfdx force:apex:test:run -l $TESTLEVEL -c -r junit -d test-reports --verbose -u org -w 10
+        after-script:
+          - |
+              rm -rf test-reports/test-result-*
+              mv test-reports/test-result.xml test-reports/test-result_$BITBUCKET_BUILD_NUMBER.xml
+              echo "Upload Junit Report to Xray"
+              export token=$(curl -H "Content-Type: application/json" -X POST --data "{ \"client_id\": \"$client_id\",\"client_secret\": \"$client_secret\" }" https://xray.cloud.xpand-it.com/api/v1/authenticate| tr -d '"')
+              curl -H "Content-Type: text/xml" -H "Authorization: Bearer $token" --data @test-reports/test-result_$BITBUCKET_BUILD_NUMBER.xml "https://xray.cloud.xpand-it.com/api/v1/import/execution/junit?projectKey=$JIRAKEY" || true
+          - | 
+              echo "Upload Reports to Confluence"
+              curl -v -S -u $CONFLUENCE_USER:$CONFLUENCE_KEY -X POST -H "X-Atlassian-Token: no-check" -F "file=@test-reports/test-result_$BITBUCKET_BUILD_NUMBER.xml" -F "comment=Test results of deployment number $BITBUCKET_BUILD_NUMBER" "https://cloudgaia.atlassian.net/wiki/rest/api/content/396068015/child/attachment" || true
+      
+    - step: &runSelenium
+        image: cloudgaia/ubuntu18-node10-chrome:1.1
+        name: Run Selenium Tests
+        script:
+          - |
+              echo "Selenium Side Installation"
+              yarn init --yes
+              yarn global add selenium-side-runner
+              mkdir test-reports
+          - |
+              echo "Execute Selenium Tests"
+              selenium-side-runner --no-sideyml -c "browserName=chrome goog:chromeOptions.args=[headless, no-sandbox]" --output-directory=test-reports --output-format=junit --debug ./sides/*.side
+        after-script:
+          - |
+              ls ./test-reports >> testsr.txt
+              while read line; do mv test-reports/$line test-reports/${line::-4}_$BITBUCKET_BUILD_NUMBER.xml; done <testsr.txt
+              echo "Upload Selenium Report to Xray"
+              export token=$(curl -H "Content-Type: application/json" -X POST --data "{ \"client_id\": \"$client_id\",\"client_secret\": \"$client_secret\" }" https://xray.cloud.xpand-it.com/api/v1/authenticate| tr -d '"')
+              ls ./test-reports >> tests.txt
+              while read line
+              do curl -H "Content-Type: text/xml" -H "Authorization: Bearer $token" --data @test-reports/$line "https://xray.cloud.xpand-it.com/api/v1/import/execution/junit?projectKey=$JIRAKEY" || true
+              done <tests.txt               
+          - |
+              echo "Upload Selenium Reports to Confluence"
+              while read line
+              do curl -v -S -u $CONFLUENCE_USER:$CONFLUENCE_KEY -X POST -H "X-Atlassian-Token: no-check" -F "file=@test-reports/$line" -F "comment=E2E Test results of CI deployment number $BITBUCKET_BUILD_NUMBER" "https://cloudgaia.atlassian.net/wiki/rest/api/content/467763466/child/attachment" || true
+              done <tests.txt
+
+    - step: &deployment
+        image: cloudgaia/sfdx-cli:1.2
+        name: Deploy
+        script:
+          #Authorize target org
+          - |
+              echo "Authorize CLI"
+              echo $AUTHURL >> authurl.txt
+              sfdx force:auth:sfdxurl:store -f ./authurl.txt -s -a org
+          # Build file with git diff output
+          ### Si BITBUCKET_BRANCH existe, el pipeline corre para un branch, compara contra el ultimo commit que realizo un deploy
+          - |
+              echo "Build Diff Metadata"
+              if [ $BITBUCKET_BRANCH ]; then
+                sfdx sfpowerkit:project:diff --output CCC --revisionfrom $LAST_COMMIT --generatedestructive
+              else
+                sfdx sfpowerkit:project:diff --output CCC --revisionfrom $BRANCH --generatedestructive
+              fi
+              rsync -av --exclude __tests__ CCC/$DEPLOYDIR/* DDD
+          - |
+              echo "Search Apex Tests"
+              export classesTestFinal=""
+              if [ -d "./DDD/classes" ]; then
+                echo "Tiene Classes"
+                export classesTest=""
+                export classes=""
+                find ./DDD/classes/ -type f -name "*.cls" -name "*Test*" -printf "%f\n" > classesTest.txt || true
+                while read line; do classesTest+=" "$line; done <classesTest.txt  && classesTest=${classesTest:1}
+                find ./DDD/classes/ -type f -name "*.cls" ! -name "*Test*" -printf "%f\n" >classes.txt || true
+                while read line; do classes+=" "$line; done <classes.txt  && classes=${classes:1}
+                for ctest in $classesTest; do classesTestFinal+=","${ctest::-4}; done
+                for ctest in $classes; do
+                    if [[ ! ${classesTest[@]} =~ ${ctest::-4}"Test.cls" ]]; then
+                        echo "La clase de test "${ctest::-4}"Test.cls no es parte del deploy!"
+                        if [ -f ./$DEPLOYDIR/classes/${ctest::-4}"Test.cls" ]; then
+                          echo "La clase de test "${ctest::-4}"Test.cls existe, se agrega para ser corrida!"
+                          classesTestFinal+=","${ctest::-4}"Test"
+                        else
+                          echo "No existe clase de test para "${ctest}
+                        fi
+                    fi
+                done
+                classesTestFinal=${classesTestFinal:1}
+                echo $classesTestFinal
+              fi
+          - |
+              echo "Build Manifest"
+              sgp --src DDD --output DDD --api-version $API_VERSION
+              cat ./DDD/package.xml
+          - | 
+              echo "Deployment"
+              if [ $classesTestFinal ]; then
+                echo "Has Apex Test"
+                sfdx force:mdapi:deploy --deploydir DDD --testlevel RunSpecifiedTests \
+                  --runtests $classesTestFinal --loglevel TRACE --verbose -u org -w 10
+              else
+                echo "No Apex Test"
+                sfdx force:mdapi:deploy --deploydir DDD --loglevel TRACE --verbose -u org -w 10
+              fi
+          - |
+              echo "Update LAST_COMMIT"
+              export UUID=$(curl -u ${BB_AUTH_STRING} -H 'Content-Type: application/json' "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/deployments_config/environments/%7B${BITBUCKET_DEPLOYMENT_ENVIRONMENT_UUID:1:-1}%7D/variables" | jq '.values[] | {uuid,key} | select(.key == "LAST_COMMIT") | .uuid')
+              curl -X PUT -u ${BB_AUTH_STRING} -H 'Content-Type: application/json' "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/deployments_config/environments/%7B${BITBUCKET_DEPLOYMENT_ENVIRONMENT_UUID:1:-1}%7D/variables/%7B${UUID:2:-2}%7D" --data '{"value" : "'${BITBUCKET_COMMIT}'"}' | jq .
+          - |
+              echo "Deployment Destructive Changes"
+              if [ -f "./CCC/destructiveChanges.xml" ]; then
+                sfdx sfpowerkit:org:destruct --manifest CCC/destructiveChanges.xml -u org || true
+              fi
+
+        artifacts:
+          - authurl.txt
+
+    - step: &deploymentDx
+        image: cloudgaia/sfdx-cli:1.2
+        name: Deploy
+        script:
+          #Authorize target org
+          - |
+              echo "Authorize CLI"
+              echo $AUTHURL >> authurl.txt
+              sfdx force:auth:sfdxurl:store -f ./authurl.txt -s -a org
+          # Build file with git diff output
+          ### Si BITBUCKET_BRANCH existe, el pipeline corre para un branch, compara contra el ultimo commit que realizo un deploy
+          - |
+              echo "Build Diff Metadata"
+              if [ $BITBUCKET_BRANCH ]; then
+                sfdx sfpowerkit:project:diff --output CCC --revisionfrom $LAST_COMMIT --generatedestructive
+              else
+                sfdx sfpowerkit:project:diff --output CCC --revisionfrom $BRANCH --generatedestructive
+              fi
+              cd CCC
+              sfdx force:source:convert --rootdir force-app --outputdir /opt/atlassian/pipelines/agent/build/DDD && cd ..
+          - |
+              echo "Search Apex Tests"
+              export classesTestFinal=""
+              if [ -d "./DDD/classes" ]; then
+                echo "Tiene Classes"
+                export classesTest=""
+                export classes=""
+                find ./DDD/classes/ -type f -name "*.cls" -name "*Test*" -printf "%f\n" > classesTest.txt || true
+                while read line; do classesTest+=" "$line; done <classesTest.txt  && classesTest=${classesTest:1}
+                find ./DDD/classes/ -type f -name "*.cls" ! -name "*Test*" -printf "%f\n" >classes.txt || true
+                while read line; do classes+=" "$line; done <classes.txt  && classes=${classes:1}
+                for ctest in $classesTest; do classesTestFinal+=","${ctest::-4}; done
+                for ctest in $classes; do
+                    if [[ ! ${classesTest[@]} =~ ${ctest::-4}"Test.cls" ]]; then
+                        echo "La clase de test "${ctest::-4}"Test.cls no es parte del deploy!"
+                        if [ -f ./force-app/main/default/classes/${ctest::-4}"Test.cls" ]; then
+                          echo "La clase de test "${ctest::-4}"Test.cls existe, se agrega para ser corrida!"
+                          classesTestFinal+=","${ctest::-4}"Test"
+                        else
+                          echo "No existe clase de test para "${ctest}
+                        fi
+                    fi
+                done
+                classesTestFinal=${classesTestFinal:1}
+                echo $classesTestFinal
+              fi
+          - |
+              echo "Build Manifest"
+              cat ./DDD/package.xml
+          - | 
+              echo "Deployment"
+              if [ $classesTestFinal ]; then
+                echo "Has Apex Test"
+                sfdx force:mdapi:deploy --deploydir DDD --testlevel RunSpecifiedTests \
+                  --runtests $classesTestFinal --loglevel TRACE --verbose -u org -w 10
+              else
+                echo "No Apex Test"
+                sfdx force:mdapi:deploy --deploydir DDD --loglevel TRACE --verbose -u org -w 10
+              fi
+          - |
+              echo "Update LAST_COMMIT"
+              export UUID=$(curl -u ${BB_AUTH_STRING} -H 'Content-Type: application/json' "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/deployments_config/environments/%7B${BITBUCKET_DEPLOYMENT_ENVIRONMENT_UUID:1:-1}%7D/variables" | jq '.values[] | {uuid,key} | select(.key == "LAST_COMMIT") | .uuid')
+              curl -X PUT -u ${BB_AUTH_STRING} -H 'Content-Type: application/json' "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/deployments_config/environments/%7B${BITBUCKET_DEPLOYMENT_ENVIRONMENT_UUID:1:-1}%7D/variables/%7B${UUID:2:-2}%7D" --data '{"value" : "'${BITBUCKET_COMMIT}'"}' | jq .
+          - |
+              echo "Deployment Destructive Changes"
+              if [ -f "./CCC/destructiveChanges.xml" ]; then
+                sfdx sfpowerkit:org:destruct --manifest CCC/destructiveChanges.xml -u org || true
+              fi
+
+        artifacts:
+          - authurl.txt
+
+clone:
+  depth: full
+pipelines:
+  branches:
+    ci:
+      - step:
+          <<: *deployment
+          name: Deploy to CI
+          deployment: CI
+      - parallel:
+          # Static Code Analyzer
+          - step: *sca
+          # Run Apex Tests
+          - step: *runApexTests
+          # Run LWC Tests
+          - step: *runLWCTests
+          # Run E2E Selenium Tests
+          - step: *runSelenium
+    ci_dx:
+      - step:
+          <<: *deploymentDx
+          name: Deploy to CI
+          deployment: CI
+      - parallel:
+          # Static Code Analyzer
+          - step: *sca
+          # Run Apex Tests
+          - step: *runApexTests
+          # Run LWC Tests
+          - step: *runLWCTests
+      - step:
+          image: cloudgaia/sfdx-cli:1.2
+          name: Build Package
+          script:
+            - |
+                echo "Authorize CLI"
+                echo $AUTHURL_DEVHUB >> authurlD.txt
+                sfdx force:auth:sfdxurl:store -f ./authurlD.txt -s -a devhub --setdefaultdevhubusername
+            - | 
+                echo "Create Release Branch"
+                git checkout -b release/build_$BITBUCKET_BUILD_NUMBER
+            - | 
+                echo "Build Unlock Package"
+                sfdx force:package:version:create --package $PACKAGE_ID --installationkeybypass --codecoverage --targetdevhubusername devhub --wait 10 --json >> response.json
+                export RELEASE_ID=$(cat response.json | jq -r '.result | .SubscriberPackageVersionId')
+                mkdir release && cp response.json release/release_$BITBUCKET_BUILD_NUMBER.json
+                sfdx force:package:version:report --package $RELEASE_ID -v devhub --verbose >> release.txt
+            - |
+                echo "Pushe Release Branch"
+                git remote set-url origin https://${BB_AUTH_STRING}@bitbucket.org/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}
+                git add release/release_$BITBUCKET_BUILD_NUMBER.json
+                git commit -m "Release build $BITBUCKET_BUILD_NUMBER"
+                git push origin release/build_$BITBUCKET_BUILD_NUMBER
+          after-script:
+            - cat response.json
+            - cat release.txt
+          artifacts:
+            - response.json
+      - step:
+          image: cloudgaia/sfdx-cli:1.2
+          name: Install Package in UAT
+          deployment: UAT
+          script:
+            - |
+                echo "Install Beta Package in UAT"
+                echo $AUTHURL >> authurlU.txt
+                sfdx force:auth:sfdxurl:store -f ./authurlU.txt -a org
+                export RELEASE_ID=$(cat response.json | jq -r '.result | .SubscriberPackageVersionId')
+                sfdx force:package:install --package $RELEASE_ID --targetusername org --wait 10
+      # Run E2E Selenium Tests
+      - step: 
+          <<: *runSelenium
+          name: Selenium Tests in UAT
+          trigger: 'manual'
+
+  custom:
+    Promote Release:
+      - variables:
+          - name: BUILD
+      - step:
+          image: cloudgaia/sfdx-cli:1.2
+          name: Promote and Release Package
+          deployment: Production
+          script:
+            - |
+                echo "Authorize CLI"
+                echo $AUTHURL_DEVHUB >> authurlD.txt
+                sfdx force:auth:sfdxurl:store -f ./authurlD.txt -s -a devhub --setdefaultdevhubusername
+            - |
+                echo "Promote Package"
+                export RELEASE_ID=$(cat release/release_$BUILD.json | jq -r '.result | .SubscriberPackageVersionId')
+                sfdx force:package:version:promote --package $RELEASE_ID --noprompt -v devhub
+            - |
+                echo "Install Package in Production"
+                echo $AUTHURL >> authurl.txt
+                sfdx force:auth:sfdxurl:store -f ./authurl.txt -a org
+                sfdx force:package:install --package $RELEASE_ID --targetusername org --wait 10
+
+    UAT:
+      - variables:
+          - name: PROMOTE_BRANCH
+      - step:
+          <<: *deployment
+          name: Deploy promotion to UAT
+          deployment: UAT
+      - step:
+          image: cloudgaia/sfdx-cli:1.1
+          name: Merge branch
+          script:
+            - |
+                echo "Merge promotion to destination branch"
+                git remote set-url origin https://${BB_AUTH_STRING}@bitbucket.org/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}
+                git checkout uat
+                git merge $PROMOTE_BRANCH --no-ff
+                git push origin uat
+
+    Production:
+      - variables:
+          - name: PROMOTE_BRANCH
+      - step:
+          <<: *deployment
+          name: Deploy promotion to PROD
+          deployment: Production
+      - step:
+        image: cloudgaia/sfdx-cli:1.1
+        name: Merge branch
+        script:
+          - |
+              echo "Merge promotion to destination branch"
+              git remote set-url origin https://${BB_AUTH_STRING}@bitbucket.org/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}
+              git checkout master
+              git merge $PROMOTE_BRANCH --no-ff
+              git push origin master
+
+    DEMO:
+      - step:
+          name: Deploy to CI
+          script:
+            - echo "Deploy to CI"
+      - parallel:
+          - step:
+              name: Static Code Analyzer
+              script:
+                - echo "Static Code Analyzer"
+          - step:
+              name: Apex Tests
+              script:
+                - echo "Apex Tests"
+          - step:
+              name: LWC Tests
+              script:
+                - echo "LWC Tests"
+      - step:
+          name: Build Package
+          script:
+            - echo "Build Package"
+      - step:
+          name: Install Package in UAT
+          script:
+            - echo "Install Package in UAT"
+      - step:
+          name: Selenium Tests in UAT
+          script:
+            - echo "Selenium Tests in UAT"
